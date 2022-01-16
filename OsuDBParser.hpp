@@ -1,10 +1,52 @@
+#pragma once
 #include <fstream>
 #include <vector>
 #include <utility>
 #include <cassert>
+#include <optional>
+#include <memory> //for std::unique_ptr
 
-struct Db
+namespace Db
 {
+    enum class Mods : unsigned
+    {
+        None = 0,
+        NoFail = 1,
+        Easy = 2,
+        TouchDevice = 4,
+        Hidden = 8,
+        HardRock = 16,
+        SuddenDeath = 32,
+        DoubleTime = 64,
+        Relax = 128,
+        HalfTime = 256,
+        Nightcore = 512, // Only set along with DoubleTime. i.e: NC only gives 576
+        Flashlight = 1024,
+        Autoplay = 2048,
+        SpunOut = 4096,
+        Relax2 = 8192,    // Autopilot
+        Perfect = 16384, // Only set along with SuddenDeath. i.e: PF only gives 16416  
+        Key4 = 32768,
+        Key5 = 65536,
+        Key6 = 131072,
+        Key7 = 262144,
+        Key8 = 524288,
+        FadeIn = 1048576,
+        Random = 2097152,
+        Cinema = 4194304,
+        Target = 8388608,
+        Key9 = 16777216,
+        KeyCoop = 33554432,
+        Key1 = 67108864,
+        Key3 = 134217728,
+        Key2 = 268435456,
+        ScoreV2 = 536870912,
+        Mirror = 1073741824,
+        KeyMod = Key1 | Key2 | Key3 | Key4 | Key5 | Key6 | Key7 | Key8 | Key9 | KeyCoop,
+        FreeModAllowed = NoFail | Easy | Hidden | HardRock | SuddenDeath | Flashlight | FadeIn | Relax | Relax2 | SpunOut | KeyMod,
+        ScoreIncreaseMods = Hidden | HardRock | DoubleTime | Flashlight | FadeIn
+    };
+
     template<typename Underlying>
     class TrivialParsable
     {
@@ -18,7 +60,7 @@ struct Db
 
         TrivialParsable() = default;
 
-        operator Underlying() const
+        constexpr operator Underlying() const
         {
             return value;
         }
@@ -27,14 +69,69 @@ struct Db
     using Short = TrivialParsable<short>;
     using Int = TrivialParsable<int32_t>;
     using Long = TrivialParsable<int64_t>;
+    using Single = TrivialParsable<float>;
+    using Double = TrivialParsable<double>;
+    using Boolean = TrivialParsable<unsigned char>;
+
+    template<typename T>
+    std::vector<T> GetArray(unsigned char const*& ptr)
+    {
+        Int const count{ ptr };
+        std::vector<T> result;
+        result.reserve(count);
+        for (int i = 0; i < count; ++i)
+        {
+            result.emplace_back(ptr);
+        }
+        return result;
+    }
+
+    template<typename T>
+    std::vector<T> GetArray(unsigned char const*& ptr, int count)
+    {
+        std::vector<T> result;
+        result.reserve(count);
+        for (int i = 0; i < count; ++i)
+        {
+            result.emplace_back(ptr);
+        }
+        return result;
+    }
+    
+    std::unique_ptr<unsigned char[]> LoadBinaryFromFile(std::ifstream&& fs)
+    {
+        if (!fs.is_open())
+            throw std::runtime_error{ "File not opened" };
+        size_t const bytes = fs.seekg(0, std::ios_base::end).tellg();
+        auto buffer = std::make_unique<unsigned char[]>(bytes);
+        fs.seekg(0, std::ios_base::beg).read(reinterpret_cast<char*>(buffer.get()), bytes);
+
+        return buffer;
+    }
 
     class ULEB128
     {
         uint64_t value{};
     public:
-        ULEB128(unsigned char const* ptr)
+        ULEB128(unsigned char const*& ptr)
         {
-            //TODO
+            unsigned long result = 0;
+            int shift = 0;
+            std::size_t count = 0;
+
+            while (true)
+            {
+                unsigned char byte = *ptr;
+                ptr++;
+                count++;
+
+                result |= (byte & 0x7f) << shift;
+                shift += 7;
+
+                if (!(byte & 0x80)) break;
+            }
+
+            value = result;
         }
 
         operator uint64_t() const
@@ -43,18 +140,23 @@ struct Db
         }
     };
 
-    using Single = TrivialParsable<float>;
-    using Double = TrivialParsable<double>;
-    using Boolean = TrivialParsable<unsigned char>;
+
 
     class String : public std::string
     {
     public:
         String(unsigned char const*& ptr)
         {
+            if (*ptr++ != 0x0b)
+                return;
 
+            ULEB128 bytes{ ptr };
+            (std::string&)(*this) = std::string{ reinterpret_cast<char const*>(ptr), bytes };
+            ptr += bytes;
         }
     };
+
+
 
     class IntDoublePair : public std::pair<Int, Double>
     {
@@ -65,13 +167,15 @@ struct Db
                 assert(false); //First byte is 0x08
             ++ptr;
             first = *reinterpret_cast<Int const*>(ptr);
-            ptr += sizeof(Int);
+            ptr += 4;
 
             if (ptr[0] != 0x0d)
                 assert(false); //The byte is 0x0d
             ++ptr;
             second = *reinterpret_cast<Double const*>(ptr);
+            ptr += 8;
         }
+
     };
 
     class TimingPoint
@@ -80,28 +184,29 @@ struct Db
         Double offset; //in milliseconds
         Boolean uninherited; //false -> inherited
     public:
-        TimingPoint(unsigned char const* ptr)
-            : bpm(*reinterpret_cast<Double const*>(ptr)),
-            offset(*reinterpret_cast<Double const*>(ptr[sizeof(Double)])),
-            uninherited(*reinterpret_cast<Boolean const*>(ptr[sizeof(Double) * 2]))
+        TimingPoint(unsigned char const*& ptr)
+            : bpm(ptr),
+            offset(ptr),
+            uninherited(ptr)
         {
         }
+
     };
 
     class DateTime
     {
         int64_t ticks{}; //amount of invervals of 100 nanoseconds since midnight Jan1, 0001 UTC
     public:
-        DateTime(unsigned char const* ptr)
-            : ticks{*reinterpret_cast<int64_t const*>(ptr)}
+        DateTime(unsigned char const*& ptr)
+            : ticks{ *reinterpret_cast<int64_t const*>(ptr) }
         {
+            ptr += sizeof(int64_t);
         }
     };
 
-    class Beatmap
+    struct Beatmap
     {
-    public:
-        enum class RankStatus : unsigned char
+        enum class RankStatusEnum : unsigned char
         {
             Unknown = 0,
             Unsubmitted = 1,
@@ -113,15 +218,18 @@ struct Db
             Loved = 7
         };
 
-        enum class Mode : unsigned char
+        using RankStatus = TrivialParsable<unsigned char>;
+
+        enum class ModeEnum : unsigned char
         {
             Std = 0x00,
             Taiko = 0x01,
             Ctb = 0x02,
             Mania = 0x03
         };
-    private:
-        
+
+        using Mode = TrivialParsable<unsigned char>;
+    
         String artistName;
         String artistNameUnicode;
         String songTitle;
@@ -131,7 +239,7 @@ struct Db
         String audioFileName;
         String md5;
         String osuFileName;
-        RankStatus rankStatus;
+        RankStatusEnum rankStatus;
         Short numHitCircles;
         Short numSliders;
         Short numSpinners;
@@ -143,6 +251,7 @@ struct Db
         Double sliderVelocity;
         std::vector<IntDoublePair> stdModStarRating;    //mod <=> star rating in std
         std::vector<IntDoublePair> taikoModStarRating;  //mod <=> star rating in taiko
+        std::vector<IntDoublePair> ctbModStarRating;    //mod <=> star rating in ctb
         std::vector<IntDoublePair> maniaModStarRating;  //mod <=> star rating in mania
         Int drainTime; //in seconds
         Int totalTime; //in milliseconds
@@ -157,7 +266,7 @@ struct Db
         Byte maniaGrade;
         Short localOffset;
         Single stackLeniency;
-        Mode mode;
+        ModeEnum mode;
         String songSource;
         String songTags;
         Short onlineOffset;
@@ -172,12 +281,65 @@ struct Db
         Boolean disableStoryboard;
         Boolean disableVideo;
         Boolean visualOverride;
-        //Int lastModified;
+        Int lastModified2;
         Byte maniaScrollSpeed;
-    public:
-        Beatmap(unsigned char const* ptr, Int version)
+
+        Beatmap(unsigned char const*& ptr) : 
+            artistName(ptr),
+            artistNameUnicode(ptr),
+            songTitle(ptr),
+            songTitleUnicode(ptr),
+            creator(ptr),
+            difficulty(ptr),
+            audioFileName(ptr),
+            md5(ptr),
+            osuFileName(ptr),
+            rankStatus(static_cast<RankStatusEnum>(static_cast<unsigned char>(RankStatus{ptr}))),
+            numHitCircles(ptr),
+            numSliders(ptr),
+            numSpinners(ptr),
+            lastModified(ptr),
+            approachRate(ptr),
+            circleSize(ptr),
+            hpDrainRate(ptr),
+            overallDifficulty(ptr),
+            sliderVelocity(ptr),
+            stdModStarRating(GetArray<IntDoublePair>(ptr)),
+            taikoModStarRating(GetArray<IntDoublePair>(ptr)),
+            ctbModStarRating(GetArray<IntDoublePair>(ptr)),
+            maniaModStarRating(GetArray<IntDoublePair>(ptr)),
+            drainTime(ptr),
+            totalTime(ptr),
+            previewTime(ptr),
+            timingPoints(GetArray<TimingPoint>(ptr)),
+            difficultyId(ptr),
+            beatmapId(ptr),
+            threadId(ptr),
+            stdGrade(ptr),
+            taikoGrade(ptr),
+            ctbGrade(ptr),
+            maniaGrade(ptr),
+            localOffset(ptr),
+            stackLeniency(ptr),
+            mode(static_cast<ModeEnum>(static_cast<unsigned char>(Mode{ ptr }))),
+            songSource(ptr),
+            songTags(ptr),
+            onlineOffset(ptr),
+            font(ptr),
+            unplayed(ptr),
+            lastPlayed(ptr),
+            isOsz2(ptr),
+            folderName(ptr),
+            lastChecked(ptr),
+            ignoreBitmapSound(ptr),
+            ignoreSkin(ptr),
+            disableStoryboard(ptr),
+            disableVideo(ptr),
+            visualOverride(ptr),
+            lastModified2(ptr),
+            maniaScrollSpeed(ptr)
         {
-            
+
         }
     };
 
@@ -192,20 +354,185 @@ struct Db
         WorldCupStaff = 32
     };
 
-    Int version{};
+    struct Osu
+    {
+        Int version{};
 
-    Int folderCount{};
+        Int folderCount{};
 
-    Boolean accountUnlocked{};
+        Boolean accountUnlocked{};
 
-    DateTime unlockAccountDate;
+        DateTime unlockAccountDate;
 
-    String playerName;
+        String playerName;
 
-    Int numBeatmaps{};
+        Int numBeatmaps{};
 
-    std::vector<Beatmap> beatmaps;
+        std::vector<Beatmap> beatmaps;
 
-    UserPermission userPermission;
-    
+        UserPermission userPermission;
+
+        Osu(unsigned char const* ptr) : 
+            version(ptr),
+            folderCount(ptr),
+            accountUnlocked(ptr),
+            unlockAccountDate(ptr),
+            playerName(ptr),
+            numBeatmaps(ptr),
+            beatmaps(GetArray<Beatmap>(ptr, numBeatmaps)),
+            userPermission(static_cast<UserPermission>(*reinterpret_cast<unsigned char const*>(ptr++)))
+        {
+        }
+
+        Osu(std::unique_ptr<unsigned char[]>&& ptr) : Osu(ptr.get())
+        {
+        }
+
+        Osu(std::ifstream&& fs) : Osu(LoadBinaryFromFile(std::move(fs)))
+        {
+        }
+    };
+
+    struct Collections
+    {
+        Int version;
+
+        struct Collection
+        {
+            String name;
+            std::vector<String> md5s;
+            Collection(unsigned char const*& ptr) : name(ptr)
+            {
+                Int const count{ ptr };
+                md5s.reserve(count);
+                for (int i = 0; i < count; ++i)
+                {
+                    md5s.emplace_back(ptr);
+                }
+            }
+        };
+
+        std::vector<Collection> collections;
+
+        Collections(unsigned char const* ptr) :
+            version{ptr}
+        {
+            Int const count{ ptr };
+            collections.reserve(count);
+            for (int i = 0; i < count; ++i)
+            {
+                collections.emplace_back(ptr);
+            }
+        }
+
+        Collections(std::unique_ptr<unsigned char[]>&& ptr) : Collections(ptr.get())
+        {
+        }
+
+        Collections(std::ifstream&& fs) : Collections(LoadBinaryFromFile(std::move(fs)))
+        {
+        }
+    };
+
+    struct Scores
+    {
+        Int version;
+        
+        struct BeatmapScore
+        {
+            String md5;
+            
+            struct Score
+            {
+                Beatmap::ModeEnum mode;
+                Int version;
+                String beatmapMd5;
+                String playerName;
+                String replayMd5;
+                Short num300;
+                Short num100;   //100 in std, 150 in taiko, 100 in ctb, 100 in mania
+                Short num50;
+                Short numGeki;
+                Short numKatus;
+                Short numMiss;
+                Int replayScore;
+                Short maxCombo;
+                Boolean perfectCombo;
+                Int mods;
+            private:
+                String _; //always empty
+            public:
+                Long timestamp;
+            private:
+                Int __;   //always 0xffffffff
+            public:
+                Long scoreId;
+                std::optional<Double> additionalMod;
+
+                Score(unsigned char const*& ptr) :
+                    mode(static_cast<Beatmap::ModeEnum>(static_cast<unsigned char>(Beatmap::Mode{ptr}))),
+                    version(ptr),
+                    beatmapMd5(ptr),
+                    playerName(ptr),
+                    replayMd5(ptr),
+                    num300(ptr),
+                    num100(ptr),
+                    num50(ptr),
+                    numGeki(ptr),
+                    numKatus(ptr),
+                    numMiss(ptr),
+                    replayScore(ptr),
+                    maxCombo(ptr),
+                    perfectCombo(ptr),
+                    mods(ptr),
+                    _(ptr),
+                    timestamp(ptr),
+                    __(ptr),
+                    scoreId(ptr)
+                {
+                    if (mods & static_cast<unsigned>(Mods::Target))
+                    {
+                        Double value{ ptr };
+                        additionalMod = value;
+                    }
+                }
+
+            };
+
+            std::vector<Score> scores;
+
+            BeatmapScore(unsigned char const*& ptr) : 
+                md5(ptr)
+            {
+                Int const count{ ptr };
+                scores.reserve(count);
+                for (int i = 0; i < count; ++i)
+                {
+                    scores.emplace_back(ptr);
+                }
+            }
+        };
+
+        std::vector<BeatmapScore> beatmapScores;
+
+        Scores(unsigned char const* ptr) :
+            version(ptr)
+        {
+            Int const count{ ptr };
+            beatmapScores.reserve(count);
+            for (int i = 0; i < count; ++i)
+            {
+                beatmapScores.emplace_back(ptr);
+            }
+        }
+
+        Scores(std::unique_ptr<unsigned char[]>&& ptr) : Scores(ptr.get())
+        {
+        }
+
+        Scores(std::ifstream&& fs) : Scores(LoadBinaryFromFile(std::move(fs)))
+        {
+        }
+    };
 };
+

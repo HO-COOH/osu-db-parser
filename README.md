@@ -1,5 +1,5 @@
 # osu-db-parser
-A small C++11 header-only utility for parsing the binary osu `db` files.
+A small C++17 header-only utility for parsing the binary osu `db` files.
 
 ## Usage
 Just copy the `OsuDBParser.hpp` to your project.
